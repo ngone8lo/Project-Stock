@@ -1,0 +1,1134 @@
+---
+title: "Project"
+author: "Ngone Lo"
+date: "06/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Predicting the daily "Low Stock Price" to find the number to look for in order to determine when to buy stock on a daily basis. 
+
+Given today's data (stock and pharma sales), can we predict the "low stock price" for tomorrow? We will use:
+
+
+1. Linear Regression
+2. KNN Regression
+3. Random Forest
+4. SVM
+6: Ensemble Model
+5. Simple Moving Average Method
+6. Auto-ARIMA (auto-regressive integrated moving average)
+7. Average of Previous 5 Days Method
+
+
+
+
+#Libraries needed
+```{r}
+#install.packages('RCurl')
+#install.packages('MASS')
+#install.packages('leaps')
+#install.packages('corrplot')
+#install.packages('caret')
+#install.packages("FNN")
+#install.packages("mlbench)
+library(tidyverse)
+library(RCurl) # getURL 
+library(MASS) # stepwise regression
+library(leaps) # all subsets regression
+library(corrplot)
+library(caret)
+library(FNN)
+library(mlbench)
+library(rcompanion)
+library(e1071) 
+```
+
+
+#Import Merged Dataset and change column names of drugs (pharma data)
+```{r}
+data<-read.csv("daily_sales_stock.csv")
+data<-drop_na(data)
+colnames(data)[3:10]<-c("Med4RheumArth","Med4OstArth", "Aspirin","Ibuprofen", "Med4Tension", "Med4Sleep", "Meds4Asthma", "Meds4Allergy")
+str(data)
+```
+
+#creating the column/variable low_price_next_day (Low Price of stock of next day) as our dependent variable
+```{r}
+shift <- function(x, n){
+  c(x[-(seq(n))], rep(NA, n))}
+
+data$low_price_next_day<-shift(data$low_mean,1)
+data<-drop_na(data)
+```
+
+#Explore Dependent (Target) Varibale: low_price_next_day (Low Price of stock of next day)
+```{r}
+ggplot(data=data)+
+  geom_boxplot(mapping = aes(x = low_price_next_day), color="#00AFBB") +
+  coord_flip()+
+  xlab("Low Stock Price of Next Day") +
+  ggtitle("Distribution of Low Stock Price (2014-2018)") +
+  theme(plot.title = element_text(size=12, face = "bold"))
+
+plotNormalHistogram(data$low_price_next_day)
+
+paste("Skewness of DV (next day low price):" ,skewness(data$low_price_next_day))
+
+
+ggplot(data = data, aes(x = as.Date(date), y = low_price_next_day))+
+  geom_line(color = "#00AFBB")+
+  xlab("Time")+
+  ylab("Low Stock Price of Next Day")+
+  ggtitle("Low Stock Price (2014-2018)") +
+  theme(plot.title = element_text(size=12, face = "bold"))
+```
+The target variable is fairly symmetrical/normally distributed.
+
+
+
+
+
+#Data Preprocessing (of IVs)
+##Structure of Dataset
+```{r}
+data<-data[,-c(1,11)] #drop index(X)  and hour columns
+str(data)
+```
+
+## Correlation Analysis
+###Identify highly correlated "numeric" variables 
+```{r}
+###draw correlation matrix of the numeric independent variables only
+num_data <- data[,-c(1,10,17)] ### remove date and weekday_name as well as low_price_next_day because it is our dependent variable
+correlationMatrix <- cor(num_data, method = "pearson") 
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(correlationMatrix, method="color", col=col(200),   
+         type="upper", order="hclust", 
+         tl.col="black", tl.srt=45, tl.cex= 0.7, #Text label color and rotation
+         # Combine with significance
+         sig.level = 0.01, 
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE
+)           
+
+```
+
+###Remove highly correlated numeric IVs (0.6)
+```{r}
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.6)
+noncor <- num_data[,-highlyCorrelated]  #keep only those not highly 
+correlationMatrix2 <- cor(noncor, method = "pearson")  ### only numeric vars
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(correlationMatrix2, method="ellipse", col=col(200),   
+         type="upper", order="hclust", 
+         tl.col="black", tl.srt=45, tl.cex= 0.7, #Text label color and rotation
+         # Combine with significance
+         sig.level = 0.01, 
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE
+)
+```
+##Normalizing numeric IVs
+```{r}
+normalize <- function(x) {
+               return ((x - min(x)) / (max(x) - min(x))) }
+
+noncor_n <- as.data.frame(lapply(noncor, normalize))
+
+data_n<-cbind(noncor_n,data[,c(1,10,17)])
+```
+
+
+
+##Features Selection by Backward Elimination
+```{r}
+full <- lm(low_price_next_day~.,data=data_n[,-11])
+stepB <- stepAIC(full, direction= "backward", trace=TRUE)
+summary(stepB)
+```
+Significant IVs are: Med4RheumArth, Aspirin, Ibuprofen, Med4Tension, Meds4Asthma, Meds4Allergy, adj_close_mean, and volume_mean. Hence will drop Med4OstArth, Med4Sleep, Meds4Allergy, and weekday_name
+
+##Dropping non-significant IVs (but still keeping date)
+```{r}
+data_n<-data_n[,-c(2,6,8,12)]
+colnames(data_n)
+```
+
+
+
+
+
+#Split Training-Test sets
+We will split the dataset into  training (2014-2017) and test(2018) sets and finally drop the variable date from all sets
+```{r}
+cut<-which(data$date=="2018-01-02")
+
+train<-data_n[1:(cut-1),-8]
+test<-data_n[cut:nrow(data_n),-8]
+```
+
+```{r}
+test_labels <- test[,8]     ##DV in the test set
+test <- test[,-8]           ##Only keep IV in the test (set)
+```
+
+
+
+
+
+
+
+#Linear Regression Model
+## Model Assumptions
+```{r}
+LRmodel1 <- lm(low_price_next_day ~., data = train)
+summary(LRmodel1)
+plot(LRmodel1)
+```
+All four assumptions of parametric linear regression were violated here. However, we decided to go against a transformation for interpretability and comparison (with other models) reasons.
+
+
+##cross validation parameters
+```{r}
+ctrl <- trainControl(method="repeatedcv", number =5, repeats=3)  
+```
+
+##Model and distribution of errors
+```{r}
+set.seed(123)
+LRmodel <- train(low_price_next_day ~ ., data= train, method="lm", trControl = ctrl)
+
+
+test_predLR <- predict(LRmodel, test)
+errors <- test_predLR - test_labels
+summary(LRmodel)
+hist(errors)
+```
+
+
+##RMSE and cases with less than 25%, 10%, 5%, and 1% error
+```{r}
+rmse <- sqrt(mean((test_labels - test_predLR)^2))
+
+rel_change <- abs(errors) / test_labels
+pred25 <- sum((rel_change<0.25)=="TRUE")/nrow(test)   ## gives the count of those who are true on the condition of rel_change<25%
+##OR pred25 <- table(rel_change<0.25)["TRUE"] / nrow(test)
+
+pred10 <- sum((rel_change<0.10)=="TRUE")/nrow(test)  ## gives the count of those who are true on the condition of rel_change<10%
+
+pred5 <- sum((rel_change<0.05)=="TRUE")/nrow(test)  ## gives the count of those who are true on the condition of rel_change<5%
+
+pred1 <- sum((rel_change<0.01)=="TRUE")/nrow(test)  ## gives the count of those who are true on the condition of rel_change<1%
+
+paste("RMSE:", rmse)
+paste("Pred(25%):", pred25)
+paste("Pred(10%):", pred10)
+paste("Pred(5%):", pred5)
+paste("Pred(1%):", pred1)
+```
+
+##Creating the time series dataset for low stock price (of next day)
+```{r}
+data_ts<-data_n[,c(8,9)]
+data_ts$date <- as.Date(data_ts$date)
+```
+
+```{r}
+train_ts<-data_ts[1:(cut-1),]
+test_ts<-data_ts[cut:nrow(data_n),]
+```
+
+##Plot
+```{r}
+test_ts$preds<- test_predLR
+ggplot(data = train_ts, aes(x = as.Date(date), y = low_price_next_day,color = "aquamarine3"))+
+  geom_line()+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = low_price_next_day ,color="dodgerblue3"))+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = preds,color="orangered3"))+
+  scale_color_identity(name = " ",
+                       breaks = c("aquamarine3", "dodgerblue3", "orangered3"),
+                       labels = c("Training", "Test", "Prediction"),
+                       guide = "legend")+
+  xlab("Time")+
+  ylab("Low Stock Price of Next Day")+
+  ggtitle("Low Stock Price (Next Day): Linear Regression") +
+  theme(plot.title = element_text(size=12, face = "bold"))
+```
+
+
+
+
+
+
+
+
+
+
+#KNN Model
+```{r}
+train_labels <- train[,8]      ##DV in the training set
+test_labels <- test_labels     ##DV in the test set
+train_set <- train[,-8]        ##Only keep IV in the training set
+test_set <- test               ##Only keep IV in the test set
+```
+
+##Best value of K
+```{r} 
+x <- 0
+for (i in 1:10)
+{
+KNNmodel <- knn.reg(train =train_set , test = test_set, y = train_labels , k = i)  
+test_predKNN<- KNNmodel$pred
+rmse <- sqrt(mean((test_labels-test_predKNN)^2))
+x[i] <- rmse
+}
+
+plot(x, type="l", col="red")
+bk<-which.min(x)
+paste('Best K(by RMSE):', bk)
+```
+
+##Model and distribution of errors
+```{r}
+set.seed(123)
+KNNmodel <- knn.reg(train =train_set , test = test_set, y = train_labels , k =bk)
+test_predKNN <- KNNmodel$pred
+errors <- test_predKNN - test_labels
+hist(errors)
+```
+
+##RMSE and cases with less than 25%, 10%, 5%, and 1% error
+```{r}
+rmse <- sqrt(mean((test_labels-test_predKNN)^2))
+
+rel_change <- abs(errors) / test_labels
+pred25 <- sum((rel_change<0.25)=="TRUE")/nrow(test_set)   ## gives the count of those who are true on the condition of rel_change<25%
+##OR pred25 <- table(rel_change<0.25)["TRUE"] / nrow(test_test)
+
+pred10 <- sum((rel_change<0.10)=="TRUE")/nrow(test_set)  ## gives the count of those who are true on the condition of rel_change<10%
+
+pred5 <- sum((rel_change<0.05)=="TRUE")/nrow(test_set)  ## gives the count of those who are true on the condition of rel_change<5%
+
+pred1 <- sum((rel_change<0.01)=="TRUE")/nrow(test_set)  ## gives the count of those who are true on the condition of rel_change<1%
+
+paste("RMSE:", rmse)
+paste("Pred(25%):", pred25)
+paste("Pred(10%):", pred10)
+paste("Pred(5%):", pred5)
+paste("Pred(1%):", pred1)
+```
+
+
+##Re-creating the time series dataset for low stock price (of next day)
+```{r}
+data_ts<-data_n[,c(8,9)]
+data_ts$date <- as.Date(data_ts$date)
+```
+
+```{r}
+train_ts<-data_ts[1:(cut-1),]
+test_ts<-data_ts[cut:nrow(data_n),]
+```
+
+##Plot
+```{r}
+test_ts$preds<- test_predKNN
+ggplot(data = train_ts, aes(x = as.Date(date), y = low_price_next_day,color = "aquamarine3"))+
+  geom_line()+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = low_price_next_day ,color="dodgerblue3"))+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = preds,color="orangered3"))+
+  scale_color_identity(name = " ",
+                       breaks = c("aquamarine3", "dodgerblue3", "orangered3"),
+                       labels = c("Training", "Test", "Prediction"),
+                       guide = "legend")+
+  xlab("Time")+
+  ylab("Low Stock Price of Next Day")+
+  ggtitle("Low Stock Price (Next Day): KNN Regression") +
+  theme(plot.title = element_text(size=12, face = "bold"))
+```
+
+
+
+
+
+
+
+
+
+
+
+#Random Forest Model
+## Best number of trees
+```{r}
+set.seed(123)
+library(randomForest)
+m1 <- randomForest(formula = low_price_next_day ~ ., data = train)
+
+plot(m1)
+bntrees<-which.min(m1$mse)
+paste("Best number of tree:", bntrees)
+```
+
+##Model and distribution of errors
+
+
+
+```{r}
+set.seed(123)
+RFmodel <- train(low_price_next_day ~ ., data= train, method="rf", ntree=bntrees, trControl = ctrl)
+
+test_predRF <- predict(RFmodel, test)
+errors <- test_predRF - test_labels
+hist(errors)
+```
+
+##RMSE and cases with less than 25%, 10%, 5%, and 1% error
+```{r}
+rmse <- sqrt(mean((test_labels-test_predRF)^2))
+
+rel_change <- abs(errors) / test_labels
+pred25 <- sum((rel_change<0.25)=="TRUE")/nrow(test)   ## gives the count of those who are true on the condition of rel_change<25%
+##OR pred25 <- table(rel_change<0.25)["TRUE"] / nrow(test)
+
+pred10 <- sum((rel_change<0.10)=="TRUE")/nrow(test)  ## gives the count of those who are true on the condition of rel_change<10%
+
+pred5 <- sum((rel_change<0.05)=="TRUE")/nrow(test)  ## gives the count of those who are true on the condition of rel_change<5%
+
+pred1 <- sum((rel_change<0.01)=="TRUE")/nrow(test)  ## gives the count of those who are true on the condition of rel_change<1%
+
+paste("RMSE:", rmse)
+paste("Pred(25%):", pred25)
+paste("Pred(10%):", pred10)
+paste("Pred(5%):", pred5)
+paste("Pred(1%):", pred1)
+```
+
+##Re-creating the time series dataset for low stock price (of next day)
+```{r}
+data_ts<-data_n[,c(8,9)]
+data_ts$date <- as.Date(data_ts$date)
+```
+
+```{r}
+train_ts<-data_ts[1:(cut-1),]
+test_ts<-data_ts[cut:nrow(data_ts),]
+```
+
+##Plot
+```{r}
+test_ts$preds<- test_predRF
+ggplot(data = train_ts, aes(x = as.Date(date), y = low_price_next_day,color = "aquamarine3"))+
+  geom_line()+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = low_price_next_day ,color="dodgerblue3"))+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = preds,color="orangered3"))+
+  scale_color_identity(name = " ",
+                       breaks = c("aquamarine3", "dodgerblue3", "orangered3"),
+                       labels = c("Training", "Test", "Prediction"),
+                       guide = "legend")+
+  xlab("Time")+
+  ylab("Low Stock Price of Next Day")+
+  ggtitle("Low Stock Price (Next Day): Random Forest Regression") +
+  theme(plot.title = element_text(size=12, face = "bold"))
+```
+
+
+
+
+
+
+
+
+
+#SVM Regression
+##Model and distribution of errors
+```{r}
+set.seed(123)
+SVMmodel <- train(low_price_next_day ~ ., data= train, method="svmPoly", trControl = ctrl)
+
+test_predSVM <- predict(SVMmodel, test)
+errors <- test_predSVM - test_labels
+hist(errors)
+```
+
+##RMSE and cases with less than 25%, 10%, 5%, and 1% error
+```{r}
+rmse <- sqrt(mean((test_labels-test_predSVM)^2))
+
+rel_change <- abs(errors) / test_labels
+pred25 <- sum((rel_change<0.25)=="TRUE")/nrow(test)   ## gives the count of those who are true on the condition of rel_change<25%
+##OR pred25 <- table(rel_change<0.25)["TRUE"] / nrow(test)
+
+pred10 <- sum((rel_change<0.10)=="TRUE")/nrow(test)  ## gives the count of those who are true on the condition of rel_change<10%
+
+pred5 <- sum((rel_change<0.05)=="TRUE")/nrow(test)  ## gives the count of those who are true on the condition of rel_change<5%
+
+pred1 <- sum((rel_change<0.01)=="TRUE")/nrow(test)  ## gives the count of those who are true on the condition of rel_change<1%
+
+paste("RMSE:", rmse)
+paste("Pred(25%):", pred25)
+paste("Pred(10%):", pred10)
+paste("Pred(5%):", pred5)
+paste("Pred(1%):", pred1)
+```
+
+##Re-creating the time series dataset for low stock price (of next day)
+```{r}
+data_ts<-data_n[,c(8,9)]
+data_ts$date <- as.Date(data_ts$date)
+```
+
+```{r}
+train_ts<-data_ts[1:(cut-1),]
+test_ts<-data_ts[cut:nrow(data_ts),]
+```
+
+##Plot
+```{r}
+test_ts$preds<- test_predSVM
+ggplot(data = train_ts, aes(x = as.Date(date), y = low_price_next_day,color = "aquamarine3"))+
+  geom_line()+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = low_price_next_day ,color="dodgerblue3"))+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = preds,color="orangered3"))+
+  scale_color_identity(name = " ",
+                       breaks = c("aquamarine3", "dodgerblue3", "orangered3"),
+                       labels = c("Training", "Test", "Prediction"),
+                       guide = "legend")+
+  xlab("Time")+
+  ylab("Low Stock Price of Next Day")+
+  ggtitle("Low Stock Price (Next Day): SVM Regression") +
+  theme(plot.title = element_text(size=12, face = "bold"))
+```
+
+
+
+
+
+
+
+
+#Ensemble Model
+```{r}
+library(caretEnsemble)
+control <- trainControl(method="repeatedcv", number = 5, repeats=3, savePredictions="final")
+algorithmList <- c('rf', 'svmPoly', 'lm')
+set.seed(123)
+models_ens <- caretList(low_price_next_day~., data= train, trControl=control, methodList=algorithmList)
+set.seed(123)
+results <- resamples(models_ens)
+summary(results)
+dotplot(results)  
+modelCor(results)
+```
+SVM is highly correlated with random forest(RF) and linear regression(LR/LM). Hence, we will keep only random forest and linear regression.
+
+##only keep RF and LR/LM
+```{r}
+library(caretEnsemble)
+control <- trainControl(method="repeatedcv", number = 5, repeats=3, savePredictions="final")
+algorithmList <- c('rf', 'lm')
+set.seed(123)
+models_ens2 <- caretList(low_price_next_day~., data= train, trControl=control, methodList=algorithmList)
+set.seed(123)
+results2 <- resamples(models_ens2)
+summary(results2)
+dotplot(results2)  
+modelCor(results2)
+```
+
+##Combine predictions of the final models (RF and LR/LM) used using stack with RF
+```{r}
+stackControl <- trainControl(method="repeatedcv", number=5, repeats=3, savePredictions=TRUE)
+set.seed(123)
+stack.rf <- caretStack(models_ens2, method="rf", metric="RMSE", trControl=stackControl)
+print(stack.rf)  ##ensemble model
+```
+
+##predict stack.rf on the test dataset and plot its errors
+```{r}
+test_predEM <- predict(stack.rf , test)
+errors <- test_predEM - test_labels
+hist(errors)
+```
+
+##RMSE and cases with less than 25%, 10%, 5%, and 1% error
+```{r}
+rmse <- sqrt(mean((test_labels-test_predEM)^2))
+
+rel_change <- abs(errors) / test_labels
+pred25 <- sum((rel_change<0.25)=="TRUE")/nrow(test)   ## gives the count of those who are true on the condition of rel_change<25%
+##OR pred25 <- table(rel_change<0.25)["TRUE"] / nrow(test)
+
+pred10 <- sum((rel_change<0.10)=="TRUE")/nrow(test)  ## gives the count of those who are true on the condition of rel_change<10%
+
+pred5 <- sum((rel_change<0.05)=="TRUE")/nrow(test)  ## gives the count of those who are true on the condition of rel_change<5%
+
+pred1 <- sum((rel_change<0.01)=="TRUE")/nrow(test)  ## gives the count of those who are true on the condition of rel_change<1%
+
+paste("RMSE:", rmse)
+paste("Pred(25%):", pred25)
+paste("Pred(10%):", pred10)
+paste("Pred(5%):", pred5)
+paste("Pred(1%):", pred1)
+```
+
+##Re-creating the time series dataset for low stock price (of next day)
+```{r}
+data_ts<-data_n[,c(8,9)]
+data_ts$date <- as.Date(data_ts$date)
+```
+
+```{r}
+train_ts<-data_ts[1:(cut-1),]
+test_ts<-data_ts[cut:nrow(data_ts),]
+```
+
+##Plot
+```{r}
+test_ts$preds<- test_predEM
+ggplot(data = train_ts, aes(x = as.Date(date), y = low_price_next_day,color = "aquamarine3"))+
+  geom_line()+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = low_price_next_day ,color="dodgerblue3"))+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = preds,color="orangered3"))+
+  scale_color_identity(name = " ",
+                       breaks = c("aquamarine3", "dodgerblue3", "orangered3"),
+                       labels = c("Training", "Test", "Prediction"),
+                       guide = "legend")+
+  xlab("Time")+
+  ylab("Low Stock Price of Next Day")+
+  ggtitle("Low Stock Price (Next Day): Ensemble Model (RF&LR)") +
+  theme(plot.title = element_text(size=12, face = "bold"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+#Simple Moving Average (of last 250 low stock price)
+##Re-creating the time series dataset for low stock price
+```{r}
+data_ts<-data[,c(1,13)]
+data_ts$date = as.Date(data_ts$date)
+```
+
+```{r}
+train_ts<-data_ts[1:(cut-1),]
+test_ts<-data_ts[cut:nrow(data_ts),]
+```
+
+##Model and distribution of errors
+```{r}
+index<-nrow(test_ts)
+preds = 0
+for (i in 1:index)
+  {
+  a = sum(train_ts$low_mean[(nrow(train_ts)-index+i):(nrow(train_ts))]) + sum(preds)
+  b = a/index
+  preds[i] <- b
+}
+errors <- preds - test_ts$low_mean
+hist(errors)
+```
+##RMSE and cases with less than 25%, 10%, 5%, and 1% error
+```{r}
+rmse <- sqrt(mean((test_ts$low_mean - preds)^2))
+
+rel_change <- abs(errors) / test_ts$low_mean
+pred25 <- sum((rel_change<0.25)=="TRUE")/nrow(test_ts)   ## gives the count of those who are true on the condition of rel_change<25%
+##OR pred25 <- table(rel_change<0.25)["TRUE"] / nrow(test_ts)
+
+pred10 <- sum((rel_change<0.10)=="TRUE")/nrow(test_ts)  ## gives the count of those who are true on the condition of rel_change<10%
+
+pred5 <- sum((rel_change<0.05)=="TRUE")/nrow(test_ts)  ## gives the count of those who are true on the condition of rel_change<5%
+
+pred1 <- sum((rel_change<0.01)=="TRUE")/nrow(test_ts)  ## gives the count of those who are true on the condition of rel_change<1%
+
+paste("RMSE:", rmse)
+paste("Pred(25%):", pred25)
+paste("Pred(10%):", pred10)
+paste("Pred(5%):", pred5)
+paste("Pred(1%):", pred1)
+```
+
+##Plot
+```{r}
+test_ts$preds <- preds
+ggplot(data = train_ts, aes(x = as.Date(date), y = low_mean,color = "aquamarine3"))+
+  geom_line()+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = low_mean ,color="dodgerblue3"))+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = preds ,color="orangered3"))+
+  scale_color_identity(name = " ",
+                       breaks = c("aquamarine3", "dodgerblue3", "orangered3"),
+                       labels = c("Training", "Test", "Predictions"),
+                       guide = "legend")+
+  xlab("Time")+
+  ylab("Low Stock Price of Next Day")+
+  ggtitle("Low Stock Price (Next Day): Moving Average Method") +
+  theme(plot.title = element_text(size=12, face = "bold"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#Auto-ARIMA
+##Re-creating the time series dataset for low stock price
+```{r}
+data_ts<-data[,c(1,13)]
+data_ts$date = as.Date(data_ts$date)
+```
+
+```{r}
+train_ts<-data_ts[1:(cut-1),]
+test_ts<-data_ts[cut:nrow(data_ts),]
+```
+
+##Model and distribution of errors
+```{r}
+#install.packages("forecast")
+library(forecast)
+ARIMAmodel <- auto.arima(train_ts$low_mean,
+                  max.p = 5,
+                  max.q = 5,
+                  max.P = 2,
+                  max.Q = 2,
+                  max.order = 5,
+                  max.d = 2,
+                  max.D = 1,
+                  start.p = 2,
+                  start.q = 2,
+                  start.P = 1,
+                  start.Q = 1,
+                  stationary = FALSE,
+                  seasonal = TRUE,
+                  ic = c("aicc", "aic", "bic"),
+                  stepwise = TRUE,
+                  nmodels = 100,
+                  trace = FALSE,
+                  method = NULL,
+                  truncate = NULL,
+                  test = c("kpss", "adf", "pp"),
+                  seasonal.test = c("seas", "ocsb", "hegy", "ch"),
+                  allowdrift = TRUE,
+                  lambda = NULL,
+                  biasadj = FALSE,
+                  parallel = FALSE)
+
+test_predARIMA<-predict(ARIMAmodel,n.ahead = nrow(test_ts))
+```
+
+
+```{r}
+test_predARIMA<- test_predARIMA$pred
+errors <- test_predARIMA - test_ts$low_mean
+hist(errors)
+```
+
+##RMSE and cases with less than 25%, 10%, 5%, and 1% error
+```{r}
+rmse <- sqrt(mean((test_ts$low_mean - test_predARIMA)^2))
+
+rel_change <- abs(errors) / test_ts$low_mean
+pred25 <- sum((rel_change<0.25)=="TRUE")/nrow(test_ts)   ## gives the count of those who are true on the condition of rel_change<25%
+##OR pred25 <- table(rel_change<0.25)["TRUE"] / nrow(test_ts)
+
+pred10 <- sum((rel_change<0.10)=="TRUE")/nrow(test_ts)  ## gives the count of those who are true on the condition of rel_change<10%
+
+pred5 <- sum((rel_change<0.05)=="TRUE")/nrow(test_ts)  ## gives the count of those who are true on the condition of rel_change<5%
+
+pred1 <- sum((rel_change<0.01)=="TRUE")/nrow(test_ts)  ## gives the count of those who are true on the condition of rel_change<1%
+
+paste("RMSE:", rmse)
+paste("Pred(25%):", pred25)
+paste("Pred(10%):", pred10)
+paste("Pred(5%):", pred5)
+paste("Pred(1%):", pred1)
+```
+
+
+##Plot
+```{r}
+test_ts$preds <- test_predARIMA
+ggplot(data = train_ts, aes(x = as.Date(date), y = low_mean,color = "aquamarine3"))+
+  geom_line()+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = low_mean ,color="dodgerblue3"))+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = preds,color="orangered3"))+
+  scale_color_identity(name = " ",
+                       breaks = c("aquamarine3", "dodgerblue3", "orangered3"),
+                       labels = c("Training", "Test", "Prediction"),
+                       guide = "legend")+
+  xlab("Time")+
+  ylab("Low Stock Price of Next Day")+
+  ggtitle("Low Stock Price (Next Day): ARIMA Method") +
+  theme(plot.title = element_text(size=12, face = "bold"))
+```
+
+
+
+
+
+
+
+
+
+
+One might ask why we cannot just average out the low stock price of the previous 2, 3, 5 days and go with it rather than engage in a "complex ML process". Averaging out the low stock values of the past 5 previous days seems reasonable and fair since the stock market operates only on weekdays (except holidays). Let's try and see. 
+
+#Average of Previous '5 Days' (of low stock price to predict next low stock price) Method
+##Re-creating the time series dataset for low stock price
+```{r}
+data_ts<-data[,c(1,13)]
+data_ts$date = as.Date(data_ts$date)
+```
+
+```{r}
+train_ts<-data_ts
+test_ts<-data_ts[6:nrow(data_ts),]
+```
+
+##Model and distribution of errors
+```{r}
+index<-nrow(test_ts)
+preds = 0
+for (i in 1:index)
+  {
+  a = sum(train_ts$low_mean[i:(i+4)])
+  b = a/5
+  preds[i] <- b
+}
+errors <- preds - test_ts$low_mean
+hist(errors)
+```
+
+##RMSE and cases with less than 25%, 10%, 5%, and 1% error
+```{r}
+rmse <- sqrt(mean((test_ts$low_mean - preds)^2))
+
+rel_change <- abs(errors) / test_ts$low_mean
+pred25 <- sum((rel_change<0.25)=="TRUE")/nrow(test_ts)   ## gives the count of those who are true on the condition of rel_change<25%
+##OR pred25 <- table(rel_change<0.25)["TRUE"] / nrow(test_ts)
+
+pred10 <- sum((rel_change<0.10)=="TRUE")/nrow(test_ts)  ## gives the count of those who are true on the condition of rel_change<10%
+
+pred5 <- sum((rel_change<0.05)=="TRUE")/nrow(test_ts)  ## gives the count of those who are true on the condition of rel_change<5%
+
+pred1 <- sum((rel_change<0.01)=="TRUE")/nrow(test_ts)  ## gives the count of those who are true on the condition of rel_change<1%
+
+paste("RMSE:", rmse)
+paste("Pred(25%):", pred25)
+paste("Pred(10%):", pred10)
+paste("Pred(5%):", pred5)
+paste("Pred(1%):", pred1)
+```
+
+
+##Plot
+```{r}
+test_ts$preds <- preds
+ggplot(data = test_ts, aes(x = as.Date(date), y = low_mean,color = "aquamarine3"))+
+  geom_line()+
+  geom_line(data = test_ts, aes(x = as.Date(date), y = preds ,color="orangered3"))+
+  scale_color_identity(name = " ",
+                       breaks = c("aquamarine3", "orangered3"),
+                       labels = c("Training/Test", "Predictions"),
+                       guide = "legend")+
+  xlab("Time")+
+  ylab("Low Stock Price of Next Day")+
+  ggtitle("Low Stock Price (Next Day): Average of Previous '5 Days'  Method") +
+  theme(plot.title = element_text(size=12, face = "bold"))
+```
+Averaging out the low stock price registered on the five previous days seems to perform poorly when there is a sharp change.
+
+
+#Long Short Term Memory (LSTM)???
+
+
+
+#Version 2: Another approch to question 1
+
+Using the 200+ financial indicators data to predict if whether or not a company's stock will go up or down the following year. From a trading perspective, we want to predict if whether or not an hypothetical trader should buy or sell at the end of the year (or at the start of the  following year) for a profit. 
+
+Our dependent variable "Class" is binary with 0 indicating a decrease in stock value for the following year (do not buy/sell) and 1 indicating an increase in value for the following year (buy/do not sell). 
+
+From a trading perspective, an hypothetical trader should buy (or not sell) at the end of the year (or at the start of the  following year) for a profit if "Class" is 1. On the other hand, an hypothetical trader should sell (or not but) at the end of the year (or at the start of the  following year) if "Class" is 0 because the stock will decrease, meaning a loss of capital.
+
+
+"From a trading perspective, the 1 identifies those stocks that an hypothetical trader should BUY at the start of the year and sell at the end of the year for a profit. From a trading perspective, the 0 identifies those stocks that an hypothetical trader should NOT BUY, since their value will decrease, meaning a loss of capital."
+
+
+
+We will use:
+1. Logistic Regression
+2. KNN
+3. Random Forest
+4. SVM
+5. Naive Bayes
+6. Ensemble Model
+
+
+
+#Libraries needed
+```{r}
+#install.packages('RCurl')
+#install.packages('MASS')
+#install.packages('leaps')
+#install.packages('corrplot')
+#install.packages('caret')
+#install.packages("FNN")
+#install.packages("mlbench)
+library(tidyverse)
+library(RCurl) # getURL 
+library(MASS) # stepwise regression
+library(leaps) # all subsets regression
+library(corrplot)
+library(caret)
+library(FNN)
+library(mlbench)
+library(rcompanion)
+library(e1071) 
+```
+
+
+#Import Datasets
+```{r}
+data2014<-read.csv("2014_Financial_Data.csv")
+data2015<-read.csv("2015_Financial_Data.csv")
+data2016<-read.csv("2016_Financial_Data.csv")
+data2017<-read.csv("2017_Financial_Data.csv")
+data2018<-read.csv("2018_Financial_Data.csv")
+```
+
+
+#Merge Datasets
+```{r}
+names(data2014)[names(data2014) == "X2015.PRICE.VAR...."] <- "PRICE_VAR_NY"
+
+names(data2015)[names(data2015) == "X2016.PRICE.VAR...."] <- "PRICE_VAR_NY"
+
+names(data2016)[names(data2016) == "X2017.PRICE.VAR...."] <- "PRICE_VAR_NY"
+
+names(data2017)[names(data2017) == "X2018.PRICE.VAR...."] <- "PRICE_VAR_NY"
+
+names(data2018)[names(data2018) == "X2019.PRICE.VAR...."] <- "PRICE_VAR_NY"
+
+data<-rbind(data2014,data2015, data2016, data2017, data2018)
+view(data)
+```
+
+
+
+#Explore Dependent (Target) Varibale: Class
+##Table
+```{r}
+table(data$Class)
+```
+
+## Change labels of Class
+1:Buy
+2:Sell
+```{r}
+data$Class  <- ifelse (data$Class ==1 , "Buy", "Sell")
+```
+
+##Plot
+```{r}
+ggplot(data)+
+  geom_bar(mapping = aes(Class, fill=Class)) +
+  ggtitle("Distribution of Class") +
+  theme(plot.title = element_text(size=12, face = "bold"))
+```
+The target variable is fairly is balanced.
+
+
+
+
+
+
+
+
+#Data Preprocessing (of IVs)
+##Dropping the columns X and PRICE_VAR_NY
+X is just the name of the companies and PRICE_VAR_NY or the the percent price variation of each stock for the year and is the numeric counterpart of our dependent variable.
+```{r}
+data<- data[ , -which(names(data) %in% c("X","PRICE_VAR_NY"))]
+```
+
+##Dealing with Missing Values
+```{r}
+#Dropping columns with more than 2000 na values
+a<-which(colSums(is.na(data))>2000)
+data_bis<-data[,-a]
+
+#Dropping columns with more than 2000zeros
+a<-which(lapply(data_bis, function(x){ length(which(x==0)) })>2000)
+data_bis<-data_bis[,-a]
+
+
+#Dropping columns with more than 2000 na values or zeros
+a<-which(lapply(data_bis, function(x){
+  length(which(x==0)) + sum(is.na(x)) 
+  })>2000)
+data_bis<-data_bis[,-a]
+```
+
+
+```{r echo=FALSE}
+data_ter<- data_bis
+
+data_ter$Operating.Expenses<-replace(data_ter$Operating.Expenses, is.na(data_ter$Operating.Expenses), mean(data_ter$Operating.Expenses, na.rm = TRUE))
+
+data_ter$Operating.Income<-replace(data_ter$Operating.Income, is.na(data_ter$Operating.Income), mean(data_ter$Operating.Income, na.rm = TRUE))
+
+data_ter$Earnings.before.Tax<-replace(data_ter$Earnings.before.Tax, is.na(data_ter$Earnings.before.Tax), mean(data_ter$Earnings.before.Tax, na.rm = TRUE))
+
+data_ter$Net.Income<-replace(data_ter$Net.Income, is.na(data_ter$Net.Income), mean(data_ter$Net.Income, na.rm = TRUE))
+
+data_ter$Net.Income.Com<-replace(data_ter$Net.Income.Com, is.na(data_ter$Net.Income.Com), mean(data_ter$Net.Income.Com, na.rm = TRUE))
+
+data_ter$EPS<-replace(data_ter$EPS, is.na(data_ter$EPS), mean(data_ter$EPS, na.rm = TRUE))
+
+data_ter$EPS.Diluted<-replace(data_ter$EPS.Diluted, is.na(data_ter$EPS.Diluted), mean(data_ter$EPS.Diluted, na.rm = TRUE))
+
+data_ter$Weighted.Average.Shs.Out<-replace(data_ter$Weighted.Average.Shs.Out, is.na(data_ter$Weighted.Average.Shs.Out), mean(data_ter$Weighted.Average.Shs.Out, na.rm = TRUE))
+
+data_ter$Weighted.Average.Shs.Out..Dil.<-replace(data_ter$Weighted.Average.Shs.Out..Dil., is.na(data_ter$Weighted.Average.Shs.Out..Dil.), mean(data_ter$Weighted.Average.Shs.Out..Dil., na.rm = TRUE))
+
+data_ter$EBITDA<-replace(data_ter$EBITDA, is.na(data_ter$EBITDA), mean(data_ter$EBITDA, na.rm = TRUE))
+
+data_ter$EBIT<-replace(data_ter$EBIT, is.na(data_ter$EBIT), mean(data_ter$EBIT, na.rm = TRUE))
+
+data_ter$Consolidated.Income<-replace(data_ter$Consolidated.Income, is.na(data_ter$Consolidated.Income), mean(data_ter$Consolidated.Income, na.rm = TRUE))
+
+data_ter$Cash.and.cash.equivalents<-replace(data_ter$Cash.and.cash.equivalents, is.na(data_ter$Cash.and.cash.equivalents), mean(data_ter$Cash.and.cash.equivalents, na.rm = TRUE))
+
+data_ter$Total.assets<-replace(data_ter$Total.assets, is.na(data_ter$Total.assets), mean(data_ter$Total.assets, na.rm = TRUE))
+
+data_ter$Total.liabilities<-replace(data_ter$Total.liabilities, is.na(data_ter$Total.liabilities), mean(data_ter$Total.liabilities, na.rm = TRUE))
+
+data_ter$Retained.earnings..deficit.<-replace(data_ter$Retained.earnings..deficit., is.na(data_ter$Retained.earnings..deficit.), mean(data_ter$Retained.earnings..deficit., na.rm = TRUE))
+
+
+data_ter$Total.shareholders.equity<-replace(data_ter$Total.shareholders.equity, is.na(data_ter$Total.shareholders.equity), mean(data_ter$Total.shareholders.equity, na.rm = TRUE))
+
+data_ter$Operating.Cash.Flow<-replace(data_ter$Operating.Cash.Flow, is.na(data_ter$Operating.Cash.Flow), mean(data_ter$Operating.Cash.Flow, na.rm = TRUE))
+
+data_ter$Investing.Cash.flow<-replace(data_ter$Investing.Cash.flow, is.na(data_ter$Investing.Cash.flow), mean(data_ter$Investing.Cash.flow, na.rm = TRUE))
+
+data_ter$Financing.Cash.Flow<-replace(data_ter$Financing.Cash.Flow, is.na(data_ter$Financing.Cash.Flow), mean(data_ter$Financing.Cash.Flow, na.rm = TRUE))
+
+data_ter$Net.cash.flow...Change.in.cash<-replace(data_ter$Net.cash.flow...Change.in.cash, is.na(data_ter$Net.cash.flow...Change.in.cash), mean(data_ter$Net.cash.flow...Change.in.cash, na.rm = TRUE))
+
+data_ter$Free.Cash.Flow<-replace(data_ter$Free.Cash.Flow, is.na(data_ter$Free.Cash.Flow), mean(data_ter$Free.Cash.Flow, na.rm = TRUE))
+
+#lapply(data_ter, function(x){x<- replace(x, is.na(x), mean(x, na.rm = TRUE)) })
+```
+
+
+## Correlation Analysis
+###Identify highly correlated "numeric" variables 
+```{r}
+###draw correlation matrix of the numeric independent variables only
+num_data <- data_ter[ , -which(names(data_ter) %in% c("Class","Sector"))] ### remove Class because it is our dependent variable and sector because it is categorical
+
+correlationMatrix <- cor(num_data, method = "pearson") 
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(correlationMatrix, method="color", col=col(200),   
+         type="upper", order="hclust", 
+         tl.col="black", tl.srt=45, tl.cex= 0.7, #Text label color and rotation
+         # Combine with significance
+         sig.level = 0.01, 
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE
+)           
+```
+
+###Remove highly correlated numeric IVs (0.6)
+```{r}
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.6)
+noncor <- num_data[,-highlyCorrelated]  #keep only those not highly 
+correlationMatrix2 <- cor(noncor, method = "pearson")  ### only numeric vars
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(correlationMatrix2, method="ellipse", col=col(200),   
+         type="upper", order="hclust", 
+         tl.col="black", tl.srt=45, tl.cex= 0.7, #Text label color and rotation
+         # Combine with significance
+         sig.level = 0.01, 
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE
+)
+```
+##Normalizing numeric IVs
+```{r}
+normalize <- function(x) {
+               return ((x - min(x)) / (max(x) - min(x))) }
+
+noncor_n <- as.data.frame(lapply(noncor, normalize))
+
+data_n<-cbind(noncor_n,data_ter[,c(23,24)])
+data_n$Class<-as.factor(data_n$Class)
+data_n$Sector<-as.factor(data_n$Sector)
+```
+
+
+
+## Feature Selection using Random Forest
+```{r}
+#install.packages("randomForest")
+library(randomForest)
+set.seed((123))
+full=randomForest(Class~., data=data_n, ntree=500)
+importance    <- importance(full)
+varImportance <- data.frame(Variables = row.names(importance), 
+                            Importance = importance[ ,'MeanDecreaseGini'])
+x <- filter(varImportance, Importance>10)   #keep only variables with importance >10
+Class <- data_n$Class
+features <- as.character(x$Variables)
+cleandata <- cbind(Class, data_n[,features])
+```
+
+
+#Train and test sets and labels (70/30 split)
+```{r}
+set.seed(123)
+rn_train <- sample(nrow(cleandata), floor(nrow(cleandata)*0.70))
+train_set <- cleandata[rn_train,]  
+test_set <- cleandata[-rn_train,]
+
+train_labels <- cleandata[rn_train, 1]
+test_labels <- cleandata[-rn_train, 1]
+```
+
+
+#Logistic regression classifier 
+```{r}
+set.seed(123)
+ctrl <- trainControl(method="repeatedcv", number =10, repeats=3)
+LRmodel <- train(Class ~ ., data= train_set, method="glm", trControl = ctrl)
+test_predLR <- predict(LRmodel, test_set)
+cf_LR <- confusionMatrix(as.factor(test_predLR), as.factor(test_labels), positive="Buy" , mode = "everything")
+print(cf_LR)
+```
+
+#KNN classifier 
